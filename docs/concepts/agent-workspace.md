@@ -41,6 +41,20 @@ workspace and seed the bootstrap files if they are missing.
 Sandbox seed copies only accept regular in-workspace files; symlink/hardlink
 aliases that resolve outside the source workspace are ignored.
 
+### Shared bootstrap files across workspaces (symlink)
+
+For security, bootstrap file reads are boundary-guarded: a symlink that resolves
+outside the workspace is treated as missing.
+
+If you intentionally keep shared bootstrap files (for example a shared
+`MEMORY.md`) under `~/.openclaw/` and point each workspace at it via symlink,
+you can opt in by setting:
+
+- `OPENCLAW_ALLOW_EXTERNAL_BOOTSTRAP_SYMLINKS=1`
+
+This only permits symlink targets within `~/.openclaw/` (it is not a general
+"read arbitrary files via symlink" bypass).
+
 If you already manage the workspace files yourself, you can disable bootstrap
 file creation:
 

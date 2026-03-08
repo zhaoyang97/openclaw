@@ -2,8 +2,9 @@ import syncFs from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { openBoundaryFile } from "../infra/boundary-file-read.js";
+import { openBoundaryFile, type BoundaryFileOpenResult } from "../infra/boundary-file-read.js";
 import { resolveRequiredHomeDir } from "../infra/home-dir.js";
+import { isPathInside } from "../infra/path-guards.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { isCronSessionKey, isSubagentSessionKey } from "../routing/session-key.js";
 import { resolveUserPath } from "../utils.js";
@@ -53,16 +54,67 @@ function workspaceFileIdentity(stat: syncFs.Stats, canonicalPath: string): strin
   return `${canonicalPath}|${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
 }
 
+function resolveOpenclawHomeDirForWorkspace(params: { workspaceDir: string }): string {
+  // Allow shared bootstrap files inside ~/.openclaw (but outside the specific workspace)
+  // when explicitly enabled via env var.
+  return path.join(os.homedir(), ".openclaw");
+}
+
+async function tryOpenSharedBootstrapSymlink(params: {
+  filePath: string;
+  workspaceDir: string;
+}): Promise<BoundaryFileOpenResult | null> {
+  const flag = process.env.OPENCLAW_ALLOW_EXTERNAL_BOOTSTRAP_SYMLINKS?.trim();
+  if (!flag || flag === "0" || flag.toLowerCase() === "false") {
+    return null;
+  }
+
+  try {
+    const stat = await fs.lstat(params.filePath);
+    if (!stat.isSymbolicLink()) {
+      return null;
+    }
+
+    const target = await fs.realpath(params.filePath);
+    const openclawHome = resolveOpenclawHomeDirForWorkspace({ workspaceDir: params.workspaceDir });
+
+    // Strict allowlist: only permit symlink targets within ~/.openclaw
+    // (this enables shared memory under ~/.openclaw/shared across multiple workspaces).
+    if (!isPathInside(openclawHome, target)) {
+      return null;
+    }
+
+    return await openBoundaryFile({
+      absolutePath: target,
+      rootPath: openclawHome,
+      boundaryLabel: "openclaw home (shared bootstrap)",
+      maxBytes: MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES,
+    });
+  } catch {
+    return null;
+  }
+}
+
 async function readWorkspaceFileWithGuards(params: {
   filePath: string;
   workspaceDir: string;
 }): Promise<WorkspaceGuardedReadResult> {
-  const opened = await openBoundaryFile({
+  let opened = await openBoundaryFile({
     absolutePath: params.filePath,
     rootPath: params.workspaceDir,
     boundaryLabel: "workspace root",
     maxBytes: MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES,
   });
+
+  if (!opened.ok) {
+    // Opt-in escape hatch for shared bootstrap files via symlink.
+    // This allows a workflow like: workspace/MEMORY.md -> ~/.openclaw/shared/MEMORY.md
+    const shared = await tryOpenSharedBootstrapSymlink(params);
+    if (shared) {
+      opened = shared;
+    }
+  }
+
   if (!opened.ok) {
     workspaceFileCache.delete(params.filePath);
     return opened;
